@@ -114,7 +114,7 @@ class OMXPlayerSync
       int sockfd;
       int clientSocket [ MAX_NUM_CLIENT_SOCKETS ];
       int acceptfd;
-      int forceRebind;
+      int forceRebind = 1;
       struct sockaddr_in server;
       struct sockaddr_in client;
       socklen_t clientaddrlen;

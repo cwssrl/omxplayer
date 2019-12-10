@@ -158,14 +158,19 @@ int OMXPlayerSync::setUpConnection ()
       server.sin_port = htons( port );
       server.sin_addr.s_addr = INADDR_ANY;
       
-      if (-1 == bind(sockfd, (const struct sockaddr *) &server,
-            sizeof(struct sockaddr_in))) {
+      if (-1 == bind(sockfd, (const struct sockaddr *) &server, sizeof(struct sockaddr_in))) {
          perror("0:bind");
+         if (-1 == close(sockfd)) {
+            perror("0:close(sockfd)");
+         }
          return 1;
       }
       
       if (-1 == listen(sockfd, 0)) {
          perror("0:listen");
+         if (-1 == close(sockfd)) {
+            perror("0:close(sockfd)");
+         }
          return 1;
       }
       
