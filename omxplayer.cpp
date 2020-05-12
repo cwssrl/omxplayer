@@ -119,6 +119,7 @@ bool              m_loop                = false;
 bool              m_is_sync_server      = false;
 bool              m_is_sync_client      = false;
 bool              m_is_sync_verbose     = false;
+bool              m_is_on_pause         = false;
 std::string       m_sync_server_address;
 int               tcp_port;
 int               sync_num_clients;
@@ -620,6 +621,7 @@ int main(int argc, char *argv[])
   const int server_address_opt = 0x503;
   const int sync_num_clients_opt = 0x504;
   const int sync_verbose_opt = 0x505;
+  const int on_pause_opt = 0x600;
 
   struct option longopts[] = {
     { "info",         no_argument,              NULL,          'i' },
@@ -688,6 +690,7 @@ int main(int argc, char *argv[])
     { "server-address",  required_argument,     NULL,          server_address_opt },
     { "sync-num-clients",  required_argument,   NULL,          sync_num_clients_opt },
     { "sync-verbose",  no_argument,             NULL,          sync_verbose_opt },
+    { "on-pause",      no_argument,             NULL,          on_pause_opt },
     { 0, 0, 0, 0 }
   };
   
@@ -994,6 +997,9 @@ int main(int argc, char *argv[])
       case sync_verbose_opt:
         m_is_sync_verbose = true;
         break;
+      case on_pause_opt:
+        m_is_on_pause = true;
+        break;
       case ':':
         return EXIT_FAILURE;
         break;
@@ -1257,6 +1263,15 @@ int main(int argc, char *argv[])
   m_av_clock->OMXStateExecute();
   sentStarted = true;
 
+
+  // Pause immeditely the video
+  if ( m_is_on_pause ) {
+    m_Pause=true;
+    if(m_has_subtitle)
+    {
+      m_player_subtitles.Pause();
+    }
+  }
 
 
   if ( m_is_sync_server )
