@@ -119,6 +119,7 @@ Usage: omxplayer [OPTIONS] [FILE]
         --sync-num-clients <num_clients>  Exact number of clients being synchronized
                                           Where num clients = num nodes - 1
         --sync-verbose                    Output Synchronization data
+        --on-pause                        Immediately pause on start
 
 For example:
 
