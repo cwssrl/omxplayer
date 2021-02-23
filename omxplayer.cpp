@@ -26,6 +26,7 @@
 #include <sys/ioctl.h>
 #include <getopt.h>
 #include <string.h>
+#include <semaphore.h>
 
 #define AV_NOWARN_DEPRECATED
 
@@ -120,16 +121,107 @@ bool              m_is_sync_server      = false;
 bool              m_is_sync_client      = false;
 bool              m_is_sync_verbose     = false;
 bool              m_is_on_pause         = false;
+bool              m_refresh             = false;
+bool              m_no_exit             = false;
+bool              m_send_eos            = false;
+bool              m_stats               = false;
 std::string       m_sync_server_address;
 int               tcp_port;
 int               sync_num_clients;
 int               i;
+OMXPlayerSync     *omxPlayerSync;
+COMXCore          g_OMX;
+CRBP              g_RBP;
+TV_DISPLAY_STATE_T tv_state;
+sem_t             *sem_omx;
+
+
 
 enum{ERROR=-1,SUCCESS,ONEBYTE};
 
+
+
+
+
+int do_exit(){
+  if (m_stats)
+    printf("\n");
+
+
+  if (m_stop)
+  {
+    unsigned t = (unsigned)(m_av_clock->OMXMediaTime()*1e-6);
+    printf("Stopped at: %02d:%02d:%02d\n", (t/3600), (t/60)%60, t%60);
+  }
+
+  if (m_NativeDeinterlace)
+  {
+    char response[80];
+    vc_gencmd(response, sizeof response, "hvs_update_fields %d", 0);
+  }
+
+  if(m_has_video && m_refresh && tv_state.display.hdmi.group && tv_state.display.hdmi.mode)
+  {
+    m_BcmHost.vc_tv_hdmi_power_on_explicit_new(HDMI_MODE_HDMI, (HDMI_RES_GROUP_T)tv_state.display.hdmi.group, tv_state.display.hdmi.mode);
+  }
+
+  m_av_clock->OMXStop();
+  m_av_clock->OMXStateIdle();
+
+  m_player_subtitles.Close();
+  m_player_video.Close();
+  m_player_audio.Close();
+
+  if (NULL != m_keyboard)
+  {
+    m_keyboard->Close();
+  }
+
+  if(m_omx_pkt)
+  {
+    m_omx_reader.FreePacket(m_omx_pkt);
+    m_omx_pkt = NULL;
+  }
+
+  m_omx_reader.Close();
+
+  m_av_clock->OMXDeinitialize();
+  if (m_av_clock)
+    delete m_av_clock;
+
+  vc_tv_show_info(0);
+
+  g_OMX.Deinitialize();
+  g_RBP.Deinitialize();
+
+
+  delete omxPlayerSync;
+
+  sem_close(sem_omx);
+
+
+  printf("have a nice day ;)\n");
+
+  // exit status success on playback end
+  if (m_send_eos){
+    return EXIT_SUCCESS;
+  }
+  // exit status OMXPlayer defined value on user quit
+  if (m_stop){
+    return 3;
+  }
+  // exit status failure on other cases
+  return EXIT_FAILURE;
+
+}
+
+
+
+
 void sig_handler(int s)
 {
-  if (s==SIGINT && !g_abort)
+  
+  if ((s==SIGINT) && !g_abort)
   {
      signal(SIGINT, SIG_DFL);
      g_abort = true;
@@ -142,6 +234,7 @@ void sig_handler(int s)
   {
      m_keyboard->Close();
   }
+  
   abort();
 }
 
@@ -545,21 +638,18 @@ int main(int argc, char *argv[])
   signal(SIGABRT, sig_handler);
   signal(SIGFPE, sig_handler);
   signal(SIGINT, sig_handler);
+  signal(SIGTERM, sig_handler);
+  signal(SIGKILL, sig_handler);
 
-  bool                  m_send_eos            = false;
   bool                  m_packet_after_seek   = false;
   bool                  m_seek_flush          = false;
   bool                  m_chapter_seek        = false;
   std::string           m_filename;
   double                m_incr                = 0;
   double                m_loop_from           = 0;
-  CRBP                  g_RBP;
-  COMXCore              g_OMX;
-  bool                  m_stats               = false;
   bool                  m_dump_format         = false;
   bool                  m_dump_format_exit    = false;
   FORMAT_3D_T           m_3d                  = CONF_FLAGS_FORMAT_NONE;
-  bool                  m_refresh             = false;
   double                startpts              = 0;
   uint32_t              m_blank_background    = 0;
   bool sentStarted = false;
@@ -567,7 +657,6 @@ int main(int argc, char *argv[])
   float m_timeout        = 10.0f; // amount of time file/network operation can stall for before timing out
   int m_orientation      = -1; // unset
   float m_fps            = 0.0f; // unset
-  TV_DISPLAY_STATE_T   tv_state;
   double last_seek_pos = 0;
   bool idle = false;
   std::string            m_cookie              = "";
@@ -622,6 +711,7 @@ int main(int argc, char *argv[])
   const int sync_num_clients_opt = 0x504;
   const int sync_verbose_opt = 0x505;
   const int on_pause_opt = 0x600;
+  const int no_exit_opt = 0x700;
 
   struct option longopts[] = {
     { "info",         no_argument,              NULL,          'i' },
@@ -691,17 +781,26 @@ int main(int argc, char *argv[])
     { "sync-num-clients",  required_argument,   NULL,          sync_num_clients_opt },
     { "sync-verbose",  no_argument,             NULL,          sync_verbose_opt },
     { "on-pause",      no_argument,             NULL,          on_pause_opt },
+    { "no-exit",      no_argument,             NULL,           no_exit_opt },
+
     { 0, 0, 0, 0 }
   };
   
+  pid_t pid = getpid();
+
+  printf("omxplayer_semaphore_%d\n", pid);
+  
+  std::string semaphore_name = "omxplayer_semaphore_" + std::to_string(pid);
+  sem_omx = sem_open(semaphore_name.c_str(), O_CREAT, 0600, 0);
+
+
   playspeed_current = playspeed_normal;
   double m_last_check_time = 0.0;
   float m_latency = 0.0f;
   int c;
   std::string mode;
 
-  //Server-client synchronization
-  OMXPlayerSync *omxPlayerSync;
+  
 
   //Build default keymap just in case the --key-config option isn't used
   map<int,int> keymap = KeyConfig::buildDefaultKeymap();
@@ -1000,6 +1099,9 @@ int main(int argc, char *argv[])
       case on_pause_opt:
         m_is_on_pause = true;
         break;
+      case no_exit_opt:
+        m_no_exit = true;
+        break;
       case ':':
         return EXIT_FAILURE;
         break;
@@ -1108,10 +1210,10 @@ int main(int argc, char *argv[])
   change_file:
 
   if(!m_omx_reader.Open(m_filename.c_str(), m_dump_format, m_config_audio.is_live, m_timeout, m_cookie.c_str(), m_user_agent.c_str(), m_lavfdopts.c_str(), m_avdict.c_str()))
-    goto do_exit;
+    do_exit();
 
   if (m_dump_format_exit)
-    goto do_exit;
+    do_exit();
 
   m_has_video     = m_omx_reader.VideoStreamCount();
   m_has_audio     = m_audio_index_use < 0 ? false : m_omx_reader.AudioStreamCount();
@@ -1139,10 +1241,10 @@ int main(int argc, char *argv[])
     m_config_video.hdmi_clock_sync = true;
 
   if(!m_av_clock->OMXInitialize())
-    goto do_exit;
+    do_exit();
 
   if(m_config_video.hdmi_clock_sync && !m_av_clock->HDMIClockSync())
-    goto do_exit;
+    do_exit();
 
   m_av_clock->OMXStateIdle();
   m_av_clock->OMXStop();
@@ -1180,7 +1282,7 @@ int main(int argc, char *argv[])
   if (m_orientation >= 0)
     m_config_video.hints.orientation = m_orientation;
   if(m_has_video && !m_player_video.Open(m_av_clock, m_config_video))
-    goto do_exit;
+    do_exit();
 
   if(m_has_subtitle || m_osd)
   {
@@ -1189,7 +1291,7 @@ int main(int argc, char *argv[])
        !ReadSrt(m_external_subtitles_path, external_subtitles))
     {
        puts("Unable to read the subtitle file.");
-       goto do_exit;
+       do_exit();
     }
 
     if(!m_player_subtitles.Open(m_omx_reader.SubtitleStreamCount(),
@@ -1202,7 +1304,7 @@ int main(int argc, char *argv[])
                                 m_subtitle_lines,
                                 m_config_video.display, m_config_video.layer + 1,
                                 m_av_clock))
-      goto do_exit;
+      do_exit();
     if(m_config_video.dst_rect.x2 > 0 && m_config_video.dst_rect.y2 > 0)
         m_player_subtitles.SetSubtitleRect(m_config_video.dst_rect.x1, m_config_video.dst_rect.y1, m_config_video.dst_rect.x2, m_config_video.dst_rect.y2);
   }
@@ -1244,7 +1346,7 @@ int main(int argc, char *argv[])
     m_config_audio.passthrough = false;
 
   if(m_has_audio && !m_player_audio.Open(m_av_clock, m_config_audio, &m_omx_reader))
-    goto do_exit;
+    do_exit();
 
   if(m_has_audio)
   {
@@ -1288,11 +1390,10 @@ int main(int argc, char *argv[])
   }
 
   
-
   while(!m_stop)
   {
     if(g_abort)
-      goto do_exit;
+      do_exit();
 
     // Eventually all this needs to be moved into OMXPlayerSync class
     if ( m_is_sync_server || m_is_sync_client )
@@ -1534,7 +1635,7 @@ int main(int argc, char *argv[])
         break;
       case KeyConfig::ACTION_EXIT:
         m_stop = true;
-        goto do_exit;
+        do_exit();
         break;
       case KeyConfig::ACTION_SEEK_BACK_SMALL:
         if(m_omx_reader.CanSeek()) m_incr = -30.0;
@@ -1692,11 +1793,11 @@ int main(int argc, char *argv[])
       sentStarted = false;
 
       if (m_omx_reader.IsEof())
-        goto do_exit;
+        do_exit();
 
       // Quick reset to reduce delay during loop & seek.
       if (m_has_video && !m_player_video.Reset())
-        goto do_exit;
+        do_exit();
 
       CLog::Log(LOGDEBUG, "Seeked %.0f %.0f %.0f\n", DVD_MSEC_TO_TIME(seek_pos), startpts, m_av_clock->OMXMediaTime());
 
@@ -1733,7 +1834,7 @@ int main(int argc, char *argv[])
     if(m_player_audio.Error())
     {
       printf("audio player error. emergency exit!!!\n");
-      goto do_exit;
+      do_exit();
     }
 
     if (update)
@@ -1942,64 +2043,74 @@ int main(int argc, char *argv[])
     }
   }
 
-do_exit:
-  if (m_stats)
-    printf("\n");
+  if(m_no_exit){
+    sem_post(sem_omx);
 
-  if (m_stop)
-  {
-    unsigned t = (unsigned)(m_av_clock->OMXMediaTime()*1e-6);
-    printf("Stopped at: %02d:%02d:%02d\n", (t/3600), (t/60)%60, t%60);
+    pause();
   }
+  
+  exit(do_exit());
+// do_exit:
+//   if (m_stats)
+//     printf("\n");
 
-  if (m_NativeDeinterlace)
-  {
-    char response[80];
-    vc_gencmd(response, sizeof response, "hvs_update_fields %d", 0);
-  }
-  if(m_has_video && m_refresh && tv_state.display.hdmi.group && tv_state.display.hdmi.mode)
-  {
-    m_BcmHost.vc_tv_hdmi_power_on_explicit_new(HDMI_MODE_HDMI, (HDMI_RES_GROUP_T)tv_state.display.hdmi.group, tv_state.display.hdmi.mode);
-  }
+//   if (m_stop)
+//   {
+//     unsigned t = (unsigned)(m_av_clock->OMXMediaTime()*1e-6);
+//     printf("Stopped at: %02d:%02d:%02d\n", (t/3600), (t/60)%60, t%60);
+//   }
 
-  m_av_clock->OMXStop();
-  m_av_clock->OMXStateIdle();
+//   if (m_NativeDeinterlace)
+//   {
+//     char response[80];
+//     vc_gencmd(response, sizeof response, "hvs_update_fields %d", 0);
+//   }
+//   if(m_has_video && m_refresh && tv_state.display.hdmi.group && tv_state.display.hdmi.mode)
+//   {
+//     m_BcmHost.vc_tv_hdmi_power_on_explicit_new(HDMI_MODE_HDMI, (HDMI_RES_GROUP_T)tv_state.display.hdmi.group, tv_state.display.hdmi.mode);
+//   }
 
-  m_player_subtitles.Close();
-  m_player_video.Close();
-  m_player_audio.Close();
-  if (NULL != m_keyboard)
-  {
-    m_keyboard->Close();
-  }
+//   m_av_clock->OMXStop();
+//   m_av_clock->OMXStateIdle();
 
-  if(m_omx_pkt)
-  {
-    m_omx_reader.FreePacket(m_omx_pkt);
-    m_omx_pkt = NULL;
-  }
+//   m_player_subtitles.Close();
+//   m_player_video.Close();
+//   m_player_audio.Close();
+//   if (NULL != m_keyboard)
+//   {
+//     m_keyboard->Close();
+//   }
 
-  m_omx_reader.Close();
+//   if(m_omx_pkt)
+//   {
+//     m_omx_reader.FreePacket(m_omx_pkt);
+//     m_omx_pkt = NULL;
+//   }
 
-  m_av_clock->OMXDeinitialize();
-  if (m_av_clock)
-    delete m_av_clock;
+//   m_omx_reader.Close();
 
-  vc_tv_show_info(0);
+//   m_av_clock->OMXDeinitialize();
+//   if (m_av_clock)
+//     delete m_av_clock;
 
-  g_OMX.Deinitialize();
-  g_RBP.Deinitialize();
+//   vc_tv_show_info(0);
 
-  delete omxPlayerSync;
+//   g_OMX.Deinitialize();
+//   g_RBP.Deinitialize();
 
-  printf("have a nice day ;)\n");
+//   delete omxPlayerSync;
 
-  // exit status success on playback end
-  if (m_send_eos)
-    return EXIT_SUCCESS;
-  // exit status OMXPlayer defined value on user quit
-  if (m_stop)
-    return 3;
-  // exit status failure on other cases
-  return EXIT_FAILURE;
+//   printf("have a nice day ;)\n");
+
+//   // exit status success on playback end
+//   if (m_send_eos)
+//     return EXIT_SUCCESS;
+//   // exit status OMXPlayer defined value on user quit
+//   if (m_stop)
+//     return 3;
+//   // exit status failure on other cases
+//   return EXIT_FAILURE;
 }
+
+
+
