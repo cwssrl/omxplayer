@@ -120,6 +120,7 @@ Usage: omxplayer [OPTIONS] [FILE]
                                           Where num clients = num nodes - 1
         --sync-verbose                    Output Synchronization data
         --on-pause                        Immediately pause on start
+        --no-exit                         Don't exit when video finish and keep displaying last frame
 
 For example:
 
